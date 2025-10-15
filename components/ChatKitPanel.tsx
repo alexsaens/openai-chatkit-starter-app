@@ -42,6 +42,9 @@ const createInitialErrors = (): ErrorState => ({
   retryable: false,
 });
 
+// ★ persist the ChatKit client secret so the same session (and thread) survives reloads
+const SECRET_STORAGE_KEY = "chatkit_client_secret_v1";
+
 export function ChatKitPanel({
   theme,
   onWidgetAction,
@@ -59,6 +62,8 @@ export function ChatKitPanel({
       ? "ready"
       : "pending"
   );
+
+  // ★ keep the same widget mounted; only use this if you truly want to hard reset
   const [widgetInstanceKey, setWidgetInstanceKey] = useState(0);
 
   const setErrorState = useCallback((updates: Partial<ErrorState>) => {
@@ -72,25 +77,19 @@ export function ChatKitPanel({
   }, []);
 
   useEffect(() => {
-    if (!isBrowser) {
-      return;
-    }
+    if (!isBrowser) return;
 
     let timeoutId: number | undefined;
 
     const handleLoaded = () => {
-      if (!isMountedRef.current) {
-        return;
-      }
+      if (!isMountedRef.current) return;
       setScriptStatus("ready");
       setErrorState({ script: null });
     };
 
     const handleError = (event: Event) => {
       console.error("Failed to load chatkit.js for some reason", event);
-      if (!isMountedRef.current) {
-        return;
-      }
+      if (!isMountedRef.current) return;
       setScriptStatus("error");
       const detail = (event as CustomEvent<unknown>)?.detail ?? "unknown error";
       setErrorState({ script: `Error: ${detail}`, retryable: false });
@@ -124,9 +123,7 @@ export function ChatKitPanel({
         "chatkit-script-error",
         handleError as EventListener
       );
-      if (timeoutId) {
-        window.clearTimeout(timeoutId);
-      }
+      if (timeoutId) window.clearTimeout(timeoutId);
     };
   }, [scriptStatus, setErrorState]);
 
@@ -144,18 +141,23 @@ export function ChatKitPanel({
     }
   }, [isWorkflowConfigured, setErrorState]);
 
+  // ★ Hard reset button should also clear the saved secret so a brand-new session is created.
   const handleResetChat = useCallback(() => {
     processedFacts.current.clear();
     if (isBrowser) {
+      try {
+        localStorage.removeItem(SECRET_STORAGE_KEY); // clear persisted session
+      } catch {}
       setScriptStatus(
         window.customElements?.get("openai-chatkit") ? "ready" : "pending"
       );
     }
     setIsInitializingSession(true);
     setErrors(createInitialErrors());
-    setWidgetInstanceKey((prev) => prev + 1);
+    setWidgetInstanceKey((prev) => prev + 1); // force remount only on explicit reset
   }, []);
 
+  // ★ This is the key: reuse the saved client secret if we have it, otherwise create a new session.
   const getClientSecret = useCallback(
     async (currentSecret: string | null) => {
       if (isDev) {
@@ -176,6 +178,19 @@ export function ChatKitPanel({
         throw new Error(detail);
       }
 
+      // ★ Try to use persisted secret first for continuity across reloads
+      if (isBrowser) {
+        try {
+          const saved = localStorage.getItem(SECRET_STORAGE_KEY);
+          if (!currentSecret && saved) {
+            if (isDev) console.info("[ChatKitPanel] Reusing saved client secret");
+            setIsInitializingSession(false);
+            setErrorState({ session: null, integration: null, retryable: false });
+            return saved;
+          }
+        } catch {}
+      }
+
       if (isMountedRef.current) {
         if (!currentSecret) {
           setIsInitializingSession(true);
@@ -183,15 +198,12 @@ export function ChatKitPanel({
         setErrorState({ session: null, integration: null, retryable: false });
       }
 
+      // No saved secret → create a new session and persist its client secret
       try {
         const response = await fetch(CREATE_SESSION_ENDPOINT, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            workflow: { id: WORKFLOW_ID },
-          }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workflow: { id: WORKFLOW_ID } }),
         });
 
         const raw = await response.text();
@@ -209,10 +221,7 @@ export function ChatKitPanel({
           try {
             data = JSON.parse(raw) as Record<string, unknown>;
           } catch (parseError) {
-            console.error(
-              "Failed to parse create-session response",
-              parseError
-            );
+            console.error("Failed to parse create-session response", parseError);
           }
         }
 
@@ -226,8 +235,13 @@ export function ChatKitPanel({
         }
 
         const clientSecret = data?.client_secret as string | undefined;
-        if (!clientSecret) {
-          throw new Error("Missing client secret in response");
+        if (!clientSecret) throw new Error("Missing client secret in response");
+
+        // ★ persist for future reloads
+        if (isBrowser) {
+          try {
+            localStorage.setItem(SECRET_STORAGE_KEY, clientSecret);
+          } catch {}
         }
 
         if (isMountedRef.current) {
@@ -288,9 +302,7 @@ export function ChatKitPanel({
       if (invocation.name === "switch_theme") {
         const requested = invocation.params.theme;
         if (requested === "light" || requested === "dark") {
-          if (isDev) {
-            console.debug("[ChatKitPanel] switch_theme", requested);
-          }
+          if (isDev) console.debug("[ChatKitPanel] switch_theme", requested);
           onThemeRequest(requested);
           return { success: true };
         }
@@ -324,8 +336,7 @@ export function ChatKitPanel({
       processedFacts.current.clear();
     },
     onError: ({ error }: { error: unknown }) => {
-      // Note that Chatkit UI handles errors for your users.
-      // Thus, your app code doesn't need to display errors on UI.
+      // ChatKit UI shows user-facing errors; we can just log.
       console.error("ChatKit error", error);
     },
   });
@@ -343,16 +354,14 @@ export function ChatKitPanel({
     });
   }
 
+  // ★ UX tweak: don’t hide the widget entirely during init; let it remain visible.
+  // If you want to keep the fade-out behavior, revert to the original className logic.
   return (
     <div className="relative flex h-[90vh] w-full flex-col overflow-hidden bg-white shadow-sm transition-colors dark:bg-slate-900">
       <ChatKit
         key={widgetInstanceKey}
         control={chatkit.control}
-        className={
-          blockingError || isInitializingSession
-            ? "pointer-events-none opacity-0"
-            : "block h-full w-full"
-        }
+        className={"block h-full w-full"} // ★ always visible
       />
       <ErrorOverlay
         error={blockingError}
@@ -372,14 +381,10 @@ function extractErrorDetail(
   payload: Record<string, unknown> | undefined,
   fallback: string
 ): string {
-  if (!payload) {
-    return fallback;
-  }
+  if (!payload) return fallback;
 
   const error = payload.error;
-  if (typeof error === "string") {
-    return error;
-  }
+  if (typeof error === "string") return error;
 
   if (
     error &&
@@ -391,15 +396,11 @@ function extractErrorDetail(
   }
 
   const details = payload.details;
-  if (typeof details === "string") {
-    return details;
-  }
+  if (typeof details === "string") return details;
 
   if (details && typeof details === "object" && "error" in details) {
     const nestedError = (details as { error?: unknown }).error;
-    if (typeof nestedError === "string") {
-      return nestedError;
-    }
+    if (typeof nestedError === "string") return nestedError;
     if (
       nestedError &&
       typeof nestedError === "object" &&
@@ -410,9 +411,7 @@ function extractErrorDetail(
     }
   }
 
-  if (typeof payload.message === "string") {
-    return payload.message;
-  }
+  if (typeof payload.message === "string") return payload.message;
 
   return fallback;
 }
