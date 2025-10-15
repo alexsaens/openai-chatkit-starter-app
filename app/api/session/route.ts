@@ -24,12 +24,10 @@ export async function POST(req: NextRequest) {
   const url = new URL(req.url);
   url.pathname = "/api/chat"; // change if your handler is different
 
-  // In Edge/runtime Web Fetch, you don't need `duplex: 'half'`.
-  // You can forward the body stream and headers as-is.
+  // Edge runtime can forward the body stream without "duplex"
   return fetch(url.toString(), {
     method: "POST",
-    headers: req.headers,        // pass through the Headers object directly
-    body: req.body,              // streams through on Edge just fine
-    // cache: "no-store",        // optional: uncomment if you want to ensure no caching
+    headers: req.headers, // pass the Headers object straight through
+    body: req.body,
   });
 }
