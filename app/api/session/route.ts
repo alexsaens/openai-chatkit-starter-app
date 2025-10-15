@@ -8,23 +8,28 @@ import { NextRequest } from "next/server";
  *   Change the pathname below if yours is different.
  */
 
-export const runtime = "edge"; // you can remove this if unsure
+export const runtime = "edge"; // remove if you prefer Node runtime
 
 export async function GET() {
-  return new Response(JSON.stringify({ ok: true, hint: "POST here proxies to /api/chat" }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
+  return new Response(
+    JSON.stringify({ ok: true, hint: "POST here proxies to /api/chat" }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }
+  );
 }
 
 export async function POST(req: NextRequest) {
   const url = new URL(req.url);
-  url.pathname = "/api/chat"; // <-- change if your real handler is /api/messages, etc.
+  url.pathname = "/api/chat"; // change if your handler is different
+
+  // In Edge/runtime Web Fetch, you don't need `duplex: 'half'`.
+  // You can forward the body stream and headers as-is.
   return fetch(url.toString(), {
     method: "POST",
-    headers: Object.fromEntries(req.headers),
-    body: req.body,
-    // @ts-ignore
-    duplex: "half",
+    headers: req.headers,        // pass through the Headers object directly
+    body: req.body,              // streams through on Edge just fine
+    // cache: "no-store",        // optional: uncomment if you want to ensure no caching
   });
 }
